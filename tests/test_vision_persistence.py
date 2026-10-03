@@ -577,3 +577,33 @@ def test_replay_projector_shape_complete_and_non_mutating():
     assert list_projected["args"][1]["deep"] == "[base64 image]"
     str_projected = _project_replay_tool_payload("tool", {"args": '{"image": "%s"}' % b64_png})
     assert str_projected["args"] == '{"image": "[base64 image]"}'
+
+
+def test_inline_leaf_case_insensitive_and_media_type_params_compact():
+    """Typed tool images with an uppercase data URI or media-type parameters were
+    compacted on master (every typed tool image part was); the base64-leaf
+    detector must keep compacting them (release gate #6328)."""
+    variants = [
+        "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=",
+        "Data:Image/Jpeg;Base64,/9j/4AAQSkZJRg==",
+        "data:image/png;name=shot.png;base64,iVBORw0KGgo=",
+        "data:image/png;charset=binary;name=a.png;base64,iVBORw0KGgo=",
+    ]
+    for url in variants:
+        assert _is_inline_base64_image_leaf({'type': 'image_url', 'image_url': {'url': url}}), url
+        assert _is_inline_base64_image_leaf({'type': 'image', 'source': url}), url
+        msg = [{'role': 'tool', 'content': [{'type': 'image_url', 'image_url': {'url': url}}]}]
+        copied, changed = _compact_image_parts_for_persistence(msg)
+        assert changed == 1, url
+        assert copied[0]['content'][0] == {'type': 'text', 'text': '[screenshot]'}, url
+    # Non-base64 and non-image references are still preserved.
+    for url in ("data:image/png;charset=utf-8,iVBOR", "data:text/plain;base64,aGVsbG8=", "https://example.com/a.png"):
+        assert not _is_inline_base64_image_leaf({'type': 'image_url', 'image_url': {'url': url}}), url
+
+
+def test_strip_base64_data_urls_media_type_params():
+    """The string projector strips parameterized base64 image data URIs too."""
+    assert _strip_base64_data_urls("data:image/png;name=shot.png;base64,iVBORw0KGgo=") == "[base64 image]"
+    assert _strip_base64_data_urls("x DATA:IMAGE/PNG;NAME=A.PNG;BASE64,iVBORw0KGgo= y") == "x [base64 image] y"
+    # Parameterized but NOT base64: preserved byte-for-byte.
+    assert _strip_base64_data_urls("data:image/png;charset=utf-8,iVBOR") == "data:image/png;charset=utf-8,iVBOR"

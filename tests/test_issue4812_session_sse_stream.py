@@ -1129,7 +1129,14 @@ def test_session_route_reconciliation_projects_pre_fix_base64_payloads(tmp_path,
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_a, **_k: "run_b")
     monkeypatch.setattr(routes, "STREAMS", {"run_b": stream})
+    # The session SSE handler finds the live run through peek_stream(); without
+    # this the fake stream is never attached and the handler waits on idle
+    # heartbeats forever (it hung the full suite on current master).
+    monkeypatch.setattr(routes, "peek_stream", lambda sid: stream if sid == "run_b" else None)
     monkeypatch.setattr(routes, "read_session_run_events", _bind_real_session_read(tmp_path))
+    # Guard: turn any unexpected idle wait into a failure instead of a hang.
+    # The expected path ends on the live stream_end without ever sleeping.
+    _stop_after_first_heartbeat(monkeypatch)
 
     handler = _FakeHandler()
     routes._handle_session_sse_stream_for_session(

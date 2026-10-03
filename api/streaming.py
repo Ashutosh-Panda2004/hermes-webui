@@ -6843,6 +6843,14 @@ def _should_strip_reasoning_content(
     return False
 
 
+# Inline base64 image data URI prefix for typed image leaves. Case-insensitive
+# (RFC 2397 scheme/media types are case-insensitive) and tolerant of media-type
+# parameters before the base64 marker (``data:image/png;name=a.png;base64,``),
+# matching the string projector below. Master compacted every typed tool image
+# part regardless of URL form, so these variants must still compact.
+_INLINE_IMAGE_DATA_URI_PREFIX = re.compile(r'data:image/[^,;\s]+(?:;[^,;]*)*;base64,', re.IGNORECASE)
+
+
 def _is_inline_base64_image_leaf(part: dict) -> bool:
     """Check if this specific dict IS an inline base64 image (leaf, not wrapper).
 
@@ -6863,11 +6871,11 @@ def _is_inline_base64_image_leaf(part: dict) -> bool:
         url = part['image_url']
     if url is None and 'url' in part:
         url = part['url']
-    if isinstance(url, str) and re.match(r'data:image/[^,;]+;base64,', url):
+    if isinstance(url, str) and _INLINE_IMAGE_DATA_URI_PREFIX.match(url):
         return True
     # Direct string source
     source = part.get('source', part.get('url', ''))
-    if isinstance(source, str) and re.match(r'data:image/[^,;]+;base64,', source):
+    if isinstance(source, str) and _INLINE_IMAGE_DATA_URI_PREFIX.match(source):
         return True
     # Anthropic-style source: {type: "base64", media_type: "image/...", ...}
     if isinstance(part.get('source'), dict):
@@ -7023,7 +7031,8 @@ def _strip_base64_data_urls(text: str) -> str:
     artifact, non-base64 data URIs and ordinary text pass through byte-for-byte.
     """
     return re.sub(
-        r'data:image/[a-zA-Z0-9][a-zA-Z0-9!#$&^_+.\-]*;base64,[A-Za-z0-9+/=]+',
+        r'data:image/[a-zA-Z0-9][a-zA-Z0-9!#$&^_+.\-]*'
+        r'(?:;[a-zA-Z0-9!#$&^_+.\-]+=[^;,\s]*)*;base64,[A-Za-z0-9+/=]+',
         '[base64 image]',
         text,
         flags=re.IGNORECASE,
