@@ -6848,7 +6848,11 @@ def _should_strip_reasoning_content(
 # parameters before the base64 marker (``data:image/png;name=a.png;base64,``),
 # matching the string projector below. Master compacted every typed tool image
 # part regardless of URL form, so these variants must still compact.
-_INLINE_IMAGE_DATA_URI_PREFIX = re.compile(r'data:image/[^,;\s]+(?:;[^,;]*)*;base64,', re.IGNORECASE)
+_INLINE_IMAGE_DATA_URI_PREFIX = re.compile(
+    r'data:image/[a-zA-Z0-9][a-zA-Z0-9!#$&^_+.\-]*'
+    r'(?:;[a-zA-Z0-9!#$&^_+.\-]+=[a-zA-Z0-9!#$&^_+.\-%]*)*;base64,',
+    re.IGNORECASE,
+)
 
 
 def _is_inline_base64_image_leaf(part: dict) -> bool:
@@ -7032,7 +7036,7 @@ def _strip_base64_data_urls(text: str) -> str:
     """
     return re.sub(
         r'data:image/[a-zA-Z0-9][a-zA-Z0-9!#$&^_+.\-]*'
-        r'(?:;[a-zA-Z0-9!#$&^_+.\-]+=[^;,\s]*)*;base64,[A-Za-z0-9+/=]+',
+        r'(?:;[a-zA-Z0-9!#$&^_+.\-]+=[a-zA-Z0-9!#$&^_+.\-%]*)*;base64,[A-Za-z0-9+/=]+',
         '[base64 image]',
         text,
         flags=re.IGNORECASE,

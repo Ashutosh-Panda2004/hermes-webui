@@ -607,3 +607,14 @@ def test_strip_base64_data_urls_media_type_params():
     assert _strip_base64_data_urls("x DATA:IMAGE/PNG;NAME=A.PNG;BASE64,iVBORw0KGgo= y") == "x [base64 image] y"
     # Parameterized but NOT base64: preserved byte-for-byte.
     assert _strip_base64_data_urls("data:image/png;charset=utf-8,iVBOR") == "data:image/png;charset=utf-8,iVBOR"
+
+
+def test_data_uri_matchers_stay_linear_on_adversarial_parameter_chains():
+    """Parameter values are restricted to RFC 2045 token characters, so a value
+    cannot swallow another ``data:image/`` prefix and make the scan quadratic."""
+    import time
+    hostile = "data:image/png" + ";k=data:image/png" * 20000
+    start = time.monotonic()
+    assert _strip_base64_data_urls(hostile) == hostile
+    assert not _is_inline_base64_image_leaf({'type': 'image_url', 'image_url': {'url': hostile}})
+    assert time.monotonic() - start < 2.0
