@@ -105,6 +105,15 @@
 
 ### Fixed
 
+- **Gateway chats no longer hang on a run-events stream that only sends keepalives.** With the Gateway backend, a
+  browser turn could wait forever when the run's event stream stayed open but only sent keepalive comments. A
+  wall-clock watchdog now re-checks the run's status after two minutes without progress (real tokens or tool events
+  reset it), settles the turn from the status when it has finished, and reconnects from the last event otherwise.
+  Along the way: a 404 from the status probe gets one immediate re-probe before failing; a reset mid-stream keeps
+  the text already streamed; Stop saves the partial reply before the browser is told; the relay exits right after
+  the run completes; and approval cards are mirrored from the status only when the Gateway reports stable approval
+  ids, so an approval click always resolves the command shown. Thanks @Ejmathewp. (#7978 by @Ejmathewp)
+
 - **The sidebar resize handle keeps the drag with the pointer that started it.** A second pointer (a pen or a second mouse) pressing the handle mid-drag used to take over the resize, so the panel jumped to follow it and the original pointer's moves and release were ignored. The original pointer now owns the drag until it releases, and the stored group-collapse snapshot accepts only true/false values, so a malformed or hand-edited value can't keep a group collapsed or change the collapse map's prototype. Thanks @someaka. (#8028 by @someaka)
 
 - **Chat no longer reports a stale Agent runtime just because Git is slow.** Under load, one of the Agent revision
