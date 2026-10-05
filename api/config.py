@@ -1413,6 +1413,63 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
+def _custom_provider_fallback_slug(
+    name: object,
+    provider_key: object = None,
+    base_url: object = None,
+) -> str:
+    """Derive a stable identity for a named entry whose name slugifies to "".
+
+    A name with no ASCII characters at all (for example a pure-CJK name)
+    leaves :func:`_custom_provider_slug_from_name` with nothing to build
+    from, and the catalog used to drop such entries silently (#8017).
+    Fall back deterministically, in order:
+
+    1. the record's ``provider_key``, slugified the same way as a name;
+    2. an endpoint-derived slug ``custom:<host>-<port>-<hash>`` — the
+       short hash of the name keeps two records that share one endpoint
+       (but are separately configured) from merging into one identity;
+    3. ``custom:name-<hash>`` from the name alone.
+
+    The hash is a plain SHA-256 of the configured name, so the same
+    config yields the same identity on every call and every restart.
+    Returns "" only when the entry carries no name at all.
+    """
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return ""
+    key_slug = _custom_provider_slug_from_name(provider_key)
+    if key_slug:
+        return key_slug
+    digest = hashlib.sha256(raw_name.encode("utf-8")).hexdigest()[:8]
+    url = str(base_url or "").strip().rstrip("/")
+    if url:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+        host = (parsed_url.hostname or "").strip().lower()
+        if host:
+            port = parsed_url.port
+            if port is None:
+                scheme = (parsed_url.scheme or "http").lower()
+                port = 443 if scheme == "https" else 80
+            return f"custom:{host}-{port}-{digest}"
+    return f"custom:name-{digest}"
+
+
+def _custom_provider_entry_slug(entry: dict) -> str:
+    """The identity the catalog uses for one ``custom_providers`` entry.
+
+    The name-derived slug whenever the name provides one (unchanged
+    behaviour for every ASCII name); otherwise the deterministic
+    fallback from the entry's ``provider_key`` / ``base_url`` / name.
+    """
+    slug = _custom_provider_slug_from_name(entry.get("name"))
+    if slug:
+        return slug
+    return _custom_provider_fallback_slug(
+        entry.get("name"), entry.get("provider_key"), entry.get("base_url")
+    )
+
+
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
     source = config_obj if isinstance(config_obj, dict) else cfg
     entries = source.get("custom_providers", [])
@@ -1519,7 +1576,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_entry_slug(entry)
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1536,7 +1593,7 @@ def _named_custom_provider_slug_for_provider(
     raw_suffix = raw.removeprefix("custom:")
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_entry_slug(entry)
         if not entry_name or not slug:
             continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
@@ -1725,7 +1782,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        return _custom_provider_entry_slug(entry) or "custom"
     return ""
 
 
@@ -2586,7 +2643,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
+            slug = _custom_provider_entry_slug(entry)
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
                 continue
@@ -3054,7 +3111,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_entry_slug(entry)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3208,7 +3265,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_entry_slug(_entry)
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -5802,7 +5859,7 @@ def _resolve_model_reasoning_efforts_impl(
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                if _custom_provider_entry_slug(_entry) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -9527,7 +9584,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
+                        return _custom_provider_entry_slug(entry)
                     return "custom"
 
             return ""
@@ -9749,7 +9806,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                _slug = _custom_provider_entry_slug(_cp) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
