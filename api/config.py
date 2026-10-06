@@ -1413,6 +1413,20 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
+def _url_port_or_none(parsed_url) -> int | None:
+    """``parsed_url.port`` without the ValueError a malformed port raises.
+
+    ``http://host:notaport`` (or an out-of-range port) makes urllib raise
+    ValueError on ``.port`` access. Identity derivation must degrade to
+    "no usable port" instead of aborting the whole catalog build; the
+    entry then surfaces through its normal connection-error path.
+    """
+    try:
+        return parsed_url.port
+    except ValueError:
+        return None
+
+
 def _custom_provider_fallback_slug(
     name: object,
     provider_key: object = None,
@@ -1447,10 +1461,15 @@ def _custom_provider_fallback_slug(
         parsed_url = urlparse(url if "://" in url else f"http://{url}")
         host = (parsed_url.hostname or "").strip().lower()
         if host:
-            port = parsed_url.port
+            port = _url_port_or_none(parsed_url)
             if port is None:
                 scheme = (parsed_url.scheme or "http").lower()
                 port = 443 if scheme == "https" else 80
+            # An IPv6 literal's colons would corrupt the @provider:model
+            # grammar this slug is embedded in, so fold them to dashes.
+            # The slug is only an identity token — the real endpoint
+            # always comes from the configured record, never the slug.
+            host = host.replace(":", "-")
             return f"custom:{host}-{port}-{digest}"
     return f"custom:name-{digest}"
 
@@ -1468,6 +1487,22 @@ def _custom_provider_entry_slug(entry: dict) -> str:
     return _custom_provider_fallback_slug(
         entry.get("name"), entry.get("provider_key"), entry.get("base_url")
     )
+
+
+def _custom_provider_entry_slug_key(entry: dict) -> str:
+    """Bare canonical identity key (no ``custom:`` prefix) for one entry.
+
+    Derived from the SAME slug the catalog mints for the entry
+    (:func:`_custom_provider_entry_slug`), so name-derived identities and
+    fallback identities (provider_key / endpoint+hash / name-hash) live in
+    one namespace. This is the entry-side counterpart of
+    :func:`_custom_provider_slug_key`, which derives the key from an id or
+    name string on the lookup side; every membership / uniqueness /
+    collision comparison must use this key for the entry side, or fallback
+    identities silently match nothing.
+    """
+    slug = _custom_provider_entry_slug(entry)
+    return slug.split(":", 1)[1] if slug.startswith("custom:") else slug
 
 
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
@@ -1721,7 +1756,7 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     host = (parsed_url.hostname or "").strip().lower()
     if not host:
         return set()
-    port = parsed_url.port
+    port = _url_port_or_none(parsed_url)
     if port is None:
         scheme = (parsed_url.scheme or "http").lower()
         port = 443 if scheme == "https" else 80
@@ -2876,10 +2911,16 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
 
     Membership is built from ALL named entries, INDEPENDENT of model ownership,
     because slug-only credential resolution scans every same-slug entry and
-    returns the first match. Raises ``AmbiguousCustomProviderError`` when 2+
-    entries share the key so an endpoint and an API key can never be resolved
-    from different entries on any path. Returns the matching entry, or ``None``
-    when no entry matches.
+    returns the first match. An entry matches by its CANONICAL catalog
+    identity (:func:`_custom_provider_entry_slug_key`) — the name-derived
+    slug when the name provides one, otherwise the fallback identity minted
+    from its ``provider_key`` / endpoint / name — so an identity the catalog
+    handed out always round-trips to the row that minted it, and two rows
+    minting the same identity (e.g. an ASCII name and another row's
+    ``provider_key``) are a collision. Raises
+    ``AmbiguousCustomProviderError`` when 2+ entries share the key so an
+    endpoint and an API key can never be resolved from different entries on
+    any path. Returns the matching entry, or ``None`` when no entry matches.
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
@@ -2890,7 +2931,7 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key:
+        if _custom_provider_entry_slug_key(entry) == slug_key:
             matches.append(entry)
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
@@ -3084,7 +3125,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _custom_provider_entry_slug_key(e) == _active_key
                 ),
                 None,
             )
@@ -3618,6 +3659,12 @@ def _custom_record_claims_slug(record: object, slug: str, *, allow_name: bool = 
             continue
         if _custom_provider_slug_key(value) == slug:
             return True
+    # A record whose name slugifies to "" (e.g. a pure-CJK name) claims the
+    # fallback identity minted from its own name/provider_key/base_url —
+    # the same canonical identity a custom_providers[] row with those
+    # fields would mint — not nothing.
+    if allow_name and _custom_provider_entry_slug_key(record) == slug:
+        return True
     return False
 
 
@@ -7326,7 +7373,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for entry in _custom_provider_entries(cfg):
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_entry_slug(entry) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
