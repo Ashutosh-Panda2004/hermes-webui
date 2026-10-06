@@ -7407,8 +7407,16 @@ def _static_models_catalog_without_live_probes() -> dict:
             )
 
         if detected_providers:
+            # Custom-provider ids are minted by _custom_provider_entry_slug
+            # and are the canonical identity for this catalog — the groups
+            # above are keyed by that exact slug. Folding their underscores
+            # here (custom:cgxy_cpa -> custom:cgxy-cpa) would orphan the
+            # group and drop the provider from the cold picker, so only
+            # non-custom ids go through canonicalisation.
             detected_providers = {
-                _canonicalise_provider_id(provider_id) or provider_id
+                provider_id
+                if provider_id.startswith("custom:")
+                else _canonicalise_provider_id(provider_id) or provider_id
                 for provider_id in detected_providers
                 if provider_id
             }
