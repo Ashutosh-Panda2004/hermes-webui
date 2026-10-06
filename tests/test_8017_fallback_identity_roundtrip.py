@@ -365,6 +365,38 @@ class TestStaticCatalogIdentity:
                 for mid in generic_ids
             ), "the CJK entry's models must not fall into the generic custom group"
 
+    def test_static_catalog_keeps_underscore_provider_key_identity(self):
+        # A provider_key with an underscore mints custom:cgxy_cpa. The
+        # static catalog must not fold that identity to custom:cgxy-cpa
+        # when canonicalising detected providers — the group is stored
+        # under the minted slug, so folding orphans it and the provider
+        # disappears from the cold picker.
+        entry = _entry(CJK_NAME, URL_A, model="key-llm", provider_key="cgxy_cpa")
+        slug = _slug(entry)
+        assert slug == "custom:cgxy_cpa"
+        with _cfg({"provider": "custom"}, [entry]):
+            result = config._static_models_catalog_without_live_probes()
+        groups = {g["provider_id"]: g for g in result.get("groups", [])}
+        assert slug in groups, (
+            f"expected a static group {slug!r}, got {sorted(groups)}"
+        )
+        static_ids = [str(m.get("id") or "") for m in groups[slug].get("models", [])]
+        assert any(mid == "key-llm" or mid.endswith(":key-llm") for mid in static_ids)
+
+    def test_static_catalog_keeps_underscore_ascii_name_identity(self):
+        # Control: an ASCII name with an underscore already mints an
+        # underscore slug in the live catalog; the cold catalog must use
+        # the same identity, not the hyphen-folded form.
+        entry = _entry("my_provider", URL_A, model="under-llm")
+        slug = _slug(entry)
+        assert slug == "custom:my_provider"
+        with _cfg({"provider": "custom"}, [entry]):
+            result = config._static_models_catalog_without_live_probes()
+        groups = {g["provider_id"]: g for g in result.get("groups", [])}
+        assert slug in groups, (
+            f"expected a static group {slug!r}, got {sorted(groups)}"
+        )
+
 
 # ── Generic records claim fallback identities consistently ───────────────────
 
