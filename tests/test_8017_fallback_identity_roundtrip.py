@@ -441,3 +441,191 @@ class TestAsciiControlRoundTrip:
                 api_key="key-ascii",
                 api_mode="chat_completions",
             )
+
+
+# ── Malformed IPv6 URLs degrade to the name fallback ─────────────────────────
+
+
+class TestMalformedIpv6Url:
+    BAD_URL = "http://[::1/v1"
+
+    def test_fallback_slug_survives_a_malformed_ipv6_url(self):
+        # urlparse() raises ValueError("Invalid IPv6 URL") on the unmatched
+        # bracket; identity derivation must degrade to the name-only
+        # fallback instead of propagating the raise.
+        digest = hashlib.sha256(CJK_NAME.encode("utf-8")).hexdigest()[:8]
+        slug = config._custom_provider_fallback_slug(CJK_NAME, None, self.BAD_URL)
+        assert slug == f"custom:name-{digest}"
+
+    def test_catalog_build_survives_a_malformed_ipv6_url(self):
+        entry = _entry(CJK_NAME, self.BAD_URL, model="ipv6-llm")
+        with _cfg({"provider": "custom"}, [entry]):
+            result = config.get_available_models()
+            _catalog_option(result, _slug(entry), "ipv6-llm")
+
+    def test_malformed_ipv6_row_does_not_brick_a_healthy_sibling(self):
+        # Identity lookup runs over every row in the profile, so the bad
+        # row must not stop a healthy sibling resolving to its exact row
+        # (the send path resolves through the same identities).
+        bad = _entry(CJK_NAME, self.BAD_URL, model="bad-llm")
+        good = _entry(
+            CJK_SIBLING, URL_B, api_key="key-b", api_mode="anthropic_messages"
+        )
+        with _cfg({"provider": "custom"}, [bad, good]):
+            result = config.get_available_models()
+            _catalog_option(result, _slug(good), SHARED)
+            _assert_bundle(
+                _slug(good),
+                name=CJK_SIBLING,
+                base_url=URL_B,
+                api_key="key-b",
+                api_mode="anthropic_messages",
+            )
+
+
+# ── Warm catalog keeps minted underscore identities ──────────────────────────
+
+
+class TestWarmCatalogIdentity:
+    def test_warm_catalog_keeps_underscore_provider_key_identity(self):
+        # Mirror of the static case: the warm builder's post-collection
+        # fold must not re-canonicalise custom:cgxy_cpa into
+        # custom:cgxy-cpa, or the group keyed by the minted slug is
+        # orphaned and the provider vanishes from the warm picker.
+        entry = _entry(CJK_NAME, URL_A, model="key-llm", provider_key="cgxy_cpa")
+        slug = _slug(entry)
+        assert slug == "custom:cgxy_cpa"
+        with _cfg({"provider": "custom"}, [entry]):
+            result = config.get_available_models()
+        groups = {g["provider_id"]: g for g in result.get("groups", [])}
+        assert slug in groups, (
+            f"expected a warm group {slug!r}, got {sorted(groups)}"
+        )
+        warm_ids = [str(m.get("id") or "") for m in groups[slug].get("models", [])]
+        assert any(mid == "key-llm" or mid.endswith(":key-llm") for mid in warm_ids)
+
+    def test_warm_catalog_keeps_underscore_ascii_name_identity(self):
+        # An ASCII name with an underscore mints custom:my_provider; the
+        # warm fold must keep that identity too (warm == static here).
+        entry = _entry("my_provider", URL_A, model="under-llm")
+        slug = _slug(entry)
+        assert slug == "custom:my_provider"
+        with _cfg({"provider": "custom"}, [entry]):
+            result = config.get_available_models()
+        groups = {g["provider_id"]: g for g in result.get("groups", [])}
+        assert slug in groups, (
+            f"expected a warm group {slug!r}, got {sorted(groups)}"
+        )
+
+
+# ── /api/models/live matches rows by canonical identity ──────────────────────
+
+
+def _run_live_models_request(monkeypatch, *, provider_id, config_data, catalog):
+    """Invoke the real routes._handle_live_models with stubbed fetch layers.
+
+    Mirrors the tests/test_issue3718 harness: provider_model_ids() returns
+    [] for custom:* (driving the custom branch) and urllib.request.urlopen
+    serves the live catalog while recording every URL actually requested.
+    """
+    import io
+    import json
+    import sys
+    import types
+    import urllib.request
+    from urllib.parse import urlparse
+
+    import api.profiles as profiles
+    import api.routes as routes
+
+    class _FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+            return False
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    models_mod = types.ModuleType("hermes_cli.models")
+    models_mod.provider_model_ids = lambda provider: []
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", models_mod)
+
+    requested: list[str] = []
+
+    def _fake_urlopen(req, timeout=None):
+        requested.append(getattr(req, "full_url", str(req)))
+        body = {"data": [{"id": mid} for mid in catalog]}
+        return _FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    routes._clear_live_models_cache()
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, extra_headers=None: payload,
+    )
+    monkeypatch.setattr(config, "get_config", lambda: config_data)
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    parsed = urlparse(f"/api/models/live?provider={provider_id}")
+    payload = routes._handle_live_models(object(), parsed)
+    return payload, requested
+
+
+class TestLiveModelsCanonicalIdentity:
+    def test_live_models_fetch_uses_the_identity_matched_row(self, monkeypatch):
+        # The catalog advertises the endpoint/hash fallback identity for a
+        # CJK row; /api/models/live must pick that row by canonical entry
+        # identity and call ITS endpoint. Name-only matching never matches
+        # the fallback slug, so the provider was never called and the
+        # endpoint returned zero models.
+        entry = _entry(CJK_NAME, URL_A, api_key="key-a")
+        slug = _slug(entry)
+        assert slug.startswith("custom:127.0.0.1-8317-")
+        config_data = {
+            "model": {"provider": slug},
+            "custom_providers": [entry],
+        }
+        payload, requested = _run_live_models_request(
+            monkeypatch,
+            provider_id=slug,
+            config_data=config_data,
+            catalog=["live-a", "live-b"],
+        )
+        assert requested == [f"{URL_A}/models"]
+        assert [m["id"] for m in payload["models"]] == ["live-a", "live-b"]
+
+    def test_live_models_ambiguous_identity_fails_closed(self, monkeypatch):
+        # An ASCII name slug and a CJK row's provider_key mint the SAME
+        # identity. The live handler must fail closed — call nobody and
+        # return zero models — instead of picking one row or borrowing
+        # the ambient model config's endpoint/key.
+        ascii_row = _entry("foo bar", "http://127.0.0.1:9001/v1", api_key="key-ascii")
+        cjk_row = _entry(
+            CJK_NAME,
+            "http://127.0.0.1:9002/v1",
+            api_key="key-cjk",
+            provider_key="foo-bar",
+        )
+        assert _slug(ascii_row) == "custom:foo-bar"
+        assert _slug(cjk_row) == "custom:foo-bar"
+        config_data = {
+            "model": {
+                "provider": "custom:foo-bar",
+                "base_url": "http://ambient.example/v1",
+                "api_key": "ambient-key",
+            },
+            "custom_providers": [ascii_row, cjk_row],
+        }
+        payload, requested = _run_live_models_request(
+            monkeypatch,
+            provider_id="custom:foo-bar",
+            config_data=config_data,
+            catalog=["live-a"],
+        )
+        assert requested == []
+        assert payload["models"] == []
