@@ -521,12 +521,18 @@ class TestWarmCatalogIdentity:
 # ── /api/models/live matches rows by canonical identity ──────────────────────
 
 
-def _run_live_models_request(monkeypatch, *, provider_id, config_data, catalog):
+def _run_live_models_request(
+    monkeypatch, *, provider_id, config_data, catalog, pool_entry=None
+):
     """Invoke the real routes._handle_live_models with stubbed fetch layers.
 
     Mirrors the tests/test_issue3718 harness: provider_model_ids() returns
     [] for custom:* (driving the custom branch) and urllib.request.urlopen
     serves the live catalog while recording every URL actually requested.
+
+    When *pool_entry* is given, an explicit credential pool is installed:
+    _has_explicit_pool_credentials() reports True and load_pool() returns a
+    pool whose select() yields that entry (runtime_api_key / base_url).
     """
     import io
     import json
@@ -561,6 +567,23 @@ def _run_live_models_request(monkeypatch, *, provider_id, config_data, catalog):
         return _FakeResponse(json.dumps(body).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    if pool_entry is not None:
+        agent_pkg = types.ModuleType("agent")
+        agent_pkg.__path__ = []
+        pool_mod = types.ModuleType("agent.credential_pool")
+
+        class _FakePool:
+            def select(self):
+                return pool_entry
+
+        pool_mod.load_pool = lambda _provider_id: _FakePool()
+        monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+        monkeypatch.setitem(sys.modules, "agent.credential_pool", pool_mod)
+        monkeypatch.setattr(
+            config, "_has_explicit_pool_credentials", lambda _provider_id: True
+        )
+
     routes._clear_live_models_cache()
     monkeypatch.setattr(
         routes,
@@ -629,3 +652,69 @@ class TestLiveModelsCanonicalIdentity:
         )
         assert requested == []
         assert payload["models"] == []
+
+    def test_live_models_ambiguous_identity_ignores_credential_pool(self, monkeypatch):
+        # Same collision as above, but now a usable explicit credential
+        # pool exists for the identity. The duplicate rows clear the
+        # endpoint/key, and the pool fallback must not resurrect them:
+        # ambiguity is terminal, so the handler returns zero models and
+        # never calls the provider.
+        import types as _types
+
+        ascii_row = _entry("foo bar", "http://127.0.0.1:9001/v1", api_key="key-ascii")
+        cjk_row = _entry(
+            CJK_NAME,
+            "http://127.0.0.1:9002/v1",
+            api_key="key-cjk",
+            provider_key="foo-bar",
+        )
+        assert _slug(ascii_row) == "custom:foo-bar"
+        assert _slug(cjk_row) == "custom:foo-bar"
+        config_data = {
+            "model": {
+                "provider": "custom:foo-bar",
+                "base_url": "http://ambient.example/v1",
+                "api_key": "ambient-key",
+            },
+            "custom_providers": [ascii_row, cjk_row],
+        }
+        pool_entry = _types.SimpleNamespace(
+            runtime_api_key="pool-key",
+            base_url="http://127.0.0.1:9100/v1",
+        )
+        payload, requested = _run_live_models_request(
+            monkeypatch,
+            provider_id="custom:foo-bar",
+            config_data=config_data,
+            catalog=["live-a"],
+            pool_entry=pool_entry,
+        )
+        assert requested == []
+        assert payload["models"] == []
+        assert payload["count"] == 0
+
+    def test_live_models_pool_fallback_serves_unambiguous_identity(self, monkeypatch):
+        # Control: a single row owns the identity but carries no endpoint
+        # or key of its own, so the explicit credential pool legitimately
+        # supplies both and the live fetch still runs.
+        import types as _types
+
+        entry = _entry("foo bar", "")
+        assert _slug(entry) == "custom:foo-bar"
+        config_data = {
+            "model": {"provider": "custom:foo-bar"},
+            "custom_providers": [entry],
+        }
+        pool_entry = _types.SimpleNamespace(
+            runtime_api_key="pool-key",
+            base_url="http://127.0.0.1:9100/v1",
+        )
+        payload, requested = _run_live_models_request(
+            monkeypatch,
+            provider_id="custom:foo-bar",
+            config_data=config_data,
+            catalog=["live-a", "live-b"],
+            pool_entry=pool_entry,
+        )
+        assert requested == ["http://127.0.0.1:9100/v1/models"]
+        assert [m["id"] for m in payload["models"]] == ["live-a", "live-b"]
