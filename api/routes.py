@@ -22708,11 +22708,20 @@ def _handle_live_models(handler, parsed):
             _allowlist_ids = []
             _custom_matches = _custom_provider_entries_for_request()
             # A qualified identity minted by several rows is ambiguous:
-            # fail closed below instead of merging those rows, and do not
-            # borrow the ambient model config's endpoint/key for them.
+            # fail closed instead of merging those rows, and do not borrow
+            # the ambient model config's endpoint/key for them.
             _custom_identity_ambiguous = (
                 provider.startswith("custom:") and len(_custom_matches) > 1
             )
+            if _custom_identity_ambiguous:
+                # Ambiguity is terminal. No row owns this identity, so no
+                # fallback below may speak for it either — in particular
+                # the explicit credential-pool fallback would resurrect an
+                # endpoint/key for it and serve models for an identity
+                # with no unique owner. Return the empty response now,
+                # before the pool, live-request, allowlist and static
+                # fallback paths can run.
+                return _finish({"provider": provider, "models": [], "count": 0})
             if provider == "custom" or provider.startswith("custom:"):
                 if not _custom_identity_ambiguous:
                     for _cp in _custom_matches:
@@ -22730,13 +22739,6 @@ def _handle_live_models(handler, parsed):
                 if custom_provider_entry:
                     _base_url = custom_provider_entry.get("base_url")
                     _api_key = _custom_provider_api_key(custom_provider_entry)
-                elif _custom_identity_ambiguous:
-                    # Fail closed: several configured rows mint this
-                    # identity, so no single row's endpoint/key may speak
-                    # for it and the ambient model config must not be
-                    # borrowed either. The request returns no models.
-                    _base_url = None
-                    _api_key = None
                 else:
                     _model_cfg = cfg.get("model", {})
                     _base_url = _model_cfg.get("base_url")
