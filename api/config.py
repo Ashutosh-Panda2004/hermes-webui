@@ -1595,8 +1595,16 @@ def _custom_provider_fallback_slug(
     digest = hashlib.sha256(raw_name.encode("utf-8")).hexdigest()[:8]
     url = str(base_url or "").strip().rstrip("/")
     if url:
-        parsed_url = urlparse(url if "://" in url else f"http://{url}")
-        host = (parsed_url.hostname or "").strip().lower()
+        try:
+            parsed_url = urlparse(url if "://" in url else f"http://{url}")
+            host = (parsed_url.hostname or "").strip().lower()
+        except ValueError:
+            # A malformed URL (e.g. an unmatched IPv6 bracket in
+            # "http://[::1/v1") makes urlparse() / .hostname raise
+            # ValueError. Identity derivation runs for every row in the
+            # profile, so one bad row must not brick every lookup —
+            # degrade to the name-only fallback below.
+            host = ""
         if host:
             port = _url_port_or_none(parsed_url)
             if port is None:
@@ -10818,12 +10826,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # #1568 — protects against future regressions in any of the ~25
         # `detected_providers.add(...)` callsites without auditing each one.
         # The fold is idempotent for already-canonical ids, so safe to run
-        # unconditionally.
+        # unconditionally. Minted custom: identities are exempt (mirroring
+        # the static catalog): they are already the canonical entry identity
+        # and their groups are keyed by the exact slug, so folding their
+        # underscores (custom:cgxy_cpa -> custom:cgxy-cpa) would orphan the
+        # group and drop the provider from the warm picker.
         if detected_providers:
             _canonicalised_detected = set()
             for _pid in detected_providers:
-                _c = _canonicalise_provider_id(_pid) or _pid
-                _canonicalised_detected.add(_c)
+                if _pid.startswith("custom:"):
+                    _canonicalised_detected.add(_pid)
+                else:
+                    _canonicalised_detected.add(_canonicalise_provider_id(_pid) or _pid)
             detected_providers = _canonicalised_detected
 
         try:
