@@ -6745,6 +6745,20 @@ def _agent_provider_identity_for_persistence(provider: str, config_data: dict) -
     Fails closed like every other slug boundary in this module: when more
     than one row could own the generated slug, raises
     ``AmbiguousCustomProviderError`` instead of persisting a guess.
+
+    Slug uniqueness alone does NOT prove the save is safe. The value being
+    persisted is the selected row's NAME, and the Agent resolves a
+    persisted name by FIRST match over the loaded ``custom_providers``
+    rows (a row claims a name through its own ``name`` / ``provider_key``
+    alias set). Two rows can mint DISTINCT generated slugs — the endpoint
+    fallback embeds each row's own host/port — while sharing one name, so
+    the slug check above passes and the persisted name then resolves to
+    the FIRST same-named row: the main runtime takes that row's endpoint
+    and key, and compression takes its key, even when a later row was the
+    one selected. The persisted alias must therefore ALSO resolve
+    uniquely: exactly one loaded row may claim the name, and it must be
+    the selected row. Anything else raises before either setter writes.
+
     Returns ``provider`` unchanged when it is not a generated slug or no
     row owns it. Pure over the passed-in ``config_data`` snapshot, so it is
     safe to call while holding ``_cfg_lock``.
@@ -6778,7 +6792,32 @@ def _agent_provider_identity_for_persistence(provider: str, config_data: dict) -
             f"{provider!r}; the provider the Agent should persist cannot be "
             f"chosen safely. Rename one so each custom provider has a unique slug."
         )
-    return str(generated[0].get("name") or "").strip() or provider
+    selected = generated[0]
+    alias = str(selected.get("name") or "").strip()
+    if not alias:
+        return provider
+    # Prove the alias being persisted resolves uniquely to the selected
+    # row under the Agent's first-match semantics (see the docstring):
+    # count every loaded row claiming this name through its name /
+    # provider_key alias set, not just the rows minting this slug.
+    alias_forms = _custom_provider_alias_set(alias, None)
+    claimants = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and alias_forms
+        & _custom_provider_alias_set(entry.get("name"), entry.get("provider_key"))
+    ]
+    if len(claimants) != 1 or claimants[0] is not selected:
+        names = [str(entry.get("name") or "").strip() for entry in claimants]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all answer to the provider name "
+            f"{alias!r} that saving {provider!r} would persist; the Agent "
+            f"resolves a saved name by first match, so the endpoint and API "
+            f"key could come from a different row than the one selected. "
+            f"Rename one so each custom provider has a unique name."
+        )
+    return alias
 
 
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
